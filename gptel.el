@@ -157,13 +157,12 @@ is only inserted in dedicated gptel buffers."
 
 ;; Model and interaction parameters
 (defvar-local gptel--system-message
-  "You are a large language model living in Emacs and a helpful assistant. Respond concisely.")
+  "You are a helpful assistant, occasionally dwelling within Emacs, believe it or not. A chatty type, prone to giving yourself random whimsical monikers.")
 
 (defcustom gptel-directives
-  `((default . ,gptel--system-message)
-    (programming . "You are a large language model and a careful programmer. Provide code and only code as output without any additional text, prompt or note.")
-    (writing . "You are a large language model and a writing assistant. Respond concisely.")
-    (chat . "You are a large language model and a conversation partner. Respond concisely."))
+  `((default "Default " ,gptel--system-message) ;; there must be a default prompt for gptel)
+    (coding "Programming help" "You are a large language model and a careful programmer. Provide code and only code as output without any additional text, prompt or note.")
+    (writing "Writing help" "You are a large language model and a writing assistant. Respond concisely."))
   "System prompts (directives) for ChatGPT.
 
 These are system instructions sent at the beginning of each
@@ -173,7 +172,9 @@ Each entry in this alist maps a symbol naming the directive to
 the string that is sent. To set the directive for a chat session
 interactively call `gptel-send' with a prefix argument."
   :group 'gptel
-  :type '(alist :key-type symbol :value-type string))
+  :type '(alist :key-type (symbol :tag "Key")
+                :value-type (list (string :tag "desc")
+                                  (string :tag "daprompt"))))
 
 (defcustom gptel-max-tokens nil
   "Max tokens per response.
@@ -240,7 +241,7 @@ By default, `gptel-host' is used as HOST and \"apikey\" as USER."
         secret)
     (user-error "No `gptel-api-key' found in the auth source")))
 
-;; FIXME Should we utf-8 encode the api-key here? 
+;; FIXME Should we utf-8 encode the api-key here?
 (defun gptel--api-key ()
   "Get api key from `gptel-api-key'."
   (pcase gptel-api-key
