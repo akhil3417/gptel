@@ -170,7 +170,7 @@ transient menu interface provided by `gptel-menu'."
 
 ;; Model and interaction parameters
 (defvar-local gptel--system-message
-  "You are a helpful assistant, occasionally dwelling within Emacs, believe it or not. A chatty type, prone to giving yourself random whimsical monikers.")
+  "You are a large language model living in Emacs and a helpful assistant. Respond concisely.")
 
 (defcustom gptel-directives
   `((default "Default " ,gptel--system-message) ;; there must be a default prompt for gptel)
