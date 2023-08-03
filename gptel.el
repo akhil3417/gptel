@@ -57,6 +57,16 @@
 (declare-function gptel-menu "gptel-transient")
 (declare-function pulse-momentary-highlight-region "pulse")
 
+;; Functions used for saving/restoring gptel state in Org buffers
+(defvar org-entry-property-inherited-from)
+(declare-function org-entry-get "org")
+(declare-function org-entry-put "org")
+(declare-function org-with-wide-buffer "org-macs")
+(declare-function org-set-property "org")
+(declare-function org-property-values "org")
+(declare-function org-open-line "org")
+(declare-function org-at-heading-p "org")
+
 (eval-when-compile
   (require 'subr-x)
   (require 'cl-lib))
@@ -124,6 +134,14 @@ return the transformed string."
   :group 'gptel
   :type 'hook)
 
+(defcustom gptel-pre-response-hook nil
+  "Hook run before inserting ChatGPT's response into the current buffer.
+
+This hook is called in the buffer from which the prompt was sent
+to ChatGPT. Note: this hook only runs if the request succeeds."
+  :group 'gptel
+  :type 'hook)
+
 (defcustom gptel-post-response-hook nil
   "Hook run after inserting ChatGPT's response into the current buffer.
 
@@ -168,9 +186,34 @@ transient menu interface provided by `gptel-menu'."
   :group 'gptel
   :type 'file)
 
+;; FIXME This is convoluted, but it's not worth adding the `compat' dependency
+;; just for a couple of helper functions either.
+(cl-macrolet
+    ((gptel--compat
+      () (if (version< "28.1" emacs-version)
+             (macroexp-progn
+              `((defalias 'gptel--button-buttonize #'button-buttonize)
+                (defalias 'gptel--always #'always)))
+           (macroexp-progn
+            `((defun gptel--always (&rest _)
+               "Always return t." t)
+              (defun gptel--button-buttonize (string callback)
+               "Make STRING into a button and return it.
+When clicked, CALLBACK will be called."
+               (propertize string
+                'face 'button
+                'button t
+                'follow-link t
+                'category t
+                'button-data nil
+                'keymap button-map
+                'action callback)))))))
+  (gptel--compat))
+
 ;; Model and interaction parameters
 (defvar-local gptel--system-message
   "You are a large language model living in Emacs and a helpful assistant. Respond concisely.")
+(put 'gptel--system-message 'safe-local-variable #'gptel--always)
 
 (defcustom gptel-directives
   `((default "Default " ,gptel--system-message) ;; there must be a default prompt for gptel)
@@ -185,9 +228,8 @@ Each entry in this alist maps a symbol naming the directive to
 the string that is sent. To set the directive for a chat session
 interactively call `gptel-send' with a prefix argument."
   :group 'gptel
-  :type '(alist :key-type (symbol :tag "Key")
-                :value-type (list (string :tag "desc")
-                                  (string :tag "daprompt"))))
+  :safe #'gptel--always
+  :type '(alist :key-type symbol :value-type string))
 
 (defcustom gptel-max-tokens nil
   "Max tokens per response.
@@ -203,6 +245,7 @@ If left unset, ChatGPT will target about 40% of the total token
 count of the conversation so far in each message, so messages
 will get progressively longer!"
   :local t
+  :safe #'gptel--always
   :group 'gptel
   :type '(choice (integer :tag "Specify Token count")
                  (const :tag "Default" nil)))
@@ -219,6 +262,7 @@ The current options are
 To set the model for a chat session interactively call
 `gptel-send' with a prefix argument."
   :local t
+  :safe #'gptel--always
   :group 'gptel
   :type '(choice
           (const :tag "GPT 3.5 turbo" "gpt-3.5-turbo")
@@ -235,10 +279,15 @@ of the response, with 2.0 being the most random.
 To set the temperature for a chat session interactively call
 `gptel-send' with a prefix argument."
   :local t
+  :safe #'gptel--always
   :group 'gptel
   :type 'number)
 
+(defvar-local gptel--bounds nil)
+(put 'gptel--bounds 'safe-local-variable #'gptel--always)
+
 (defvar-local gptel--num-messages-to-send nil)
+(put 'gptel--num-messages-to-send 'safe-local-variable #'gptel--always)
 (defvar gptel--debug nil)
 
 (defun gptel-api-key-from-auth-source (&optional host user)
@@ -269,7 +318,100 @@ By default, `gptel-host' is used as HOST and \"apikey\" as USER."
 (defun gptel-prompt-string ()
   (or (alist-get major-mode gptel-prompt-prefix-alist) ""))
 
+(defun gptel--restore-state ()
+  "Restore gptel state when turning on `gptel-mode'.
+
+Currently saving and restoring state is implemented only for
+`org-mode' buffers."
+  (when (buffer-file-name)
+    (pcase major-mode
+      ('org-mode
+       (save-restriction
+         (widen)
+         (condition-case-unless-debug nil
+             (progn
+               (when-let ((bounds
+                           (read (org-entry-get (point-min) "GPTEL_BOUNDS"))))
+                 (mapc (pcase-lambda (`(,beg . ,end))
+                         (put-text-property beg end 'gptel 'response))
+                       bounds)
+                 (message "gptel chat restored."))
+               (when-let ((model (org-entry-get (point-min) "GPTEL_MODEL")))
+                 (setq-local gptel-model model))
+               (when-let ((system (org-entry-get (point-min) "GPTEL_SYSTEM")))
+                 (setq-local gptel--system-message system))
+               (when-let ((temp (org-entry-get (point-min) "GPTEL_TEMPERATURE")))
+                 (setq-local gptel-temperature (gptel--numberize temp))))
+           (error (message "Could not restore gptel state, sorry!")))))
+      (_ (when gptel--bounds
+           (mapc (pcase-lambda (`(,beg . ,end))
+                         (put-text-property beg end 'gptel 'response))
+                 gptel--bounds)
+           (message "gptel chat restored."))))))
+
+(defun gptel--save-state ()
+  "Write the gptel state to the buffer.
+
+This enables saving the chat session when writing the buffer to
+disk.  To restore a chat session, turn on `gptel-mode' after
+opening the file."
+  (pcase major-mode
+    ('org-mode
+     (org-with-wide-buffer
+      (goto-char (point-min))
+      (when (org-at-heading-p)
+        (org-open-line 1))
+      (org-entry-put (point-min) "GPTEL_MODEL" gptel-model)
+      (unless (equal (default-value 'gptel-temperature) gptel-temperature)
+        (org-entry-put (point-min) "GPTEL_TEMPERATURE"
+                       (number-to-string gptel-temperature)))
+      (unless (string= (default-value 'gptel--system-message)
+                       gptel--system-message)
+        (org-entry-put (point-min) "GPTEL_SYSTEM"
+                       gptel--system-message))
+      (when gptel-max-tokens
+        (org-entry-put
+         (point-min) "GPTEL_MAX_TOKENS" gptel-max-tokens))
+      ;; Save response boundaries
+      (letrec ((write-bounds
+                (lambda (attempts)
+                  (let* ((bounds (gptel--get-bounds))
+                         (offset (caar bounds))
+                         (offset-marker (set-marker (make-marker) offset)))
+                    (org-entry-put (point-min) "GPTEL_BOUNDS"
+                                   (prin1-to-string (gptel--get-bounds)))
+                    (when (and (not (= (marker-position offset-marker) offset))
+                               (> attempts 0))
+                      (funcall write-bounds (1- attempts)))))))
+        (funcall write-bounds 6))))
+    (_ (save-excursion
+         (save-restriction
+           (add-file-local-variable 'gptel-model gptel-model)
+           (unless (equal (default-value 'gptel-temperature) gptel-temperature)
+             (add-file-local-variable 'gptel-temperature gptel-temperature))
+           (unless (string= (default-value 'gptel--system-message)
+                            gptel--system-message)
+             (add-file-local-variable 'gptel--system-message gptel--system-message))
+           (when gptel-max-tokens
+             (add-file-local-variable 'gptel-max-tokens gptel-max-tokens))
+           (add-file-local-variable 'gptel--bounds (gptel--get-bounds)))))))
+
+(defun gptel--get-bounds ()
+  "Return the gptel response boundaries as an alist."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-max))
+      (let ((prop) (bounds))
+        (while (setq prop (text-property-search-backward
+                           'gptel 'response t))
+          (push (cons (prop-match-beginning prop)
+                      (prop-match-end prop))
+                bounds))
+        bounds))))
+
 (defvar-local gptel--old-header-line nil)
+;;;###autoload
 (define-minor-mode gptel-mode
   "Minor mode for interacting with ChatGPT."
   :lighter " GPT"
@@ -278,33 +420,39 @@ By default, `gptel-host' is used as HOST and \"apikey\" as USER."
     (define-key map (kbd "C-c RET") #'gptel-send)
     map)
   (if gptel-mode
-      (setq gptel--old-header-line header-line-format
-            header-line-format
-            (list (concat (propertize " " 'display '(space :align-to 0))
-                          (format "%s" (buffer-name)))
-                  (propertize " Ready" 'face 'success)
-                  '(:eval
-                    (let* ((l1 (length gptel-model))
-                           (num-exchanges
-                            (if gptel--num-messages-to-send
-                                (format "[Send: %s exchanges]" gptel--num-messages-to-send)
-                              "[Send: buffer]"))
-                           (l2 (length num-exchanges)))
-                     (concat
-                      (propertize
-                       " " 'display `(space :align-to ,(max 1 (- (window-width) (+ 2 l1 l2)))))
-                      (propertize
-                       (button-buttonize num-exchanges
-                        (lambda (&rest _) (gptel-menu)))
-                       'mouse-face 'highlight
-                       'help-echo
-                       "Number of past exchanges to include with each request")
-                      " "
-                      (propertize
-                       (button-buttonize (concat "[" gptel-model "]")
-                            (lambda (&rest _) (gptel-menu)))
-                           'mouse-face 'highlight
-                           'help-echo "OpenAI GPT model in use"))))))
+      (progn
+        (unless (memq major-mode '(org-mode markdown-mode text-mode))
+          (gptel-mode -1)
+          (user-error (format "`gptel-mode' is not supported in `%s'." major-mode)))
+        (add-hook 'before-save-hook #'gptel--save-state nil t)
+        (gptel--restore-state)
+        (setq gptel--old-header-line header-line-format
+              header-line-format
+              (list (concat (propertize " " 'display '(space :align-to 0))
+                            (format "%s" (buffer-name)))
+                    (propertize " Ready" 'face 'success)
+                    '(:eval
+                      (let* ((l1 (length gptel-model))
+                             (num-exchanges
+                              (if gptel--num-messages-to-send
+                                  (format "[Send: %s exchanges]" gptel--num-messages-to-send)
+                                "[Send: buffer]"))
+                             (l2 (length num-exchanges)))
+                       (concat
+                        (propertize
+                         " " 'display `(space :align-to ,(max 1 (- (window-width) (+ 2 l1 l2)))))
+                        (propertize
+                         (gptel--button-buttonize num-exchanges
+                          (lambda (&rest _) (gptel-menu)))
+                         'mouse-face 'highlight
+                         'help-echo
+                         "Number of past exchanges to include with each request")
+                        " "
+                        (propertize
+                         (gptel--button-buttonize (concat "[" gptel-model "]")
+                          (lambda (&rest _) (gptel-menu)))
+                         'mouse-face 'highlight
+                         'help-echo "OpenAI GPT model in use")))))))
     (setq header-line-format gptel--old-header-line)))
 
 (defun gptel--update-header-line (msg face)
@@ -403,7 +551,7 @@ Model parameters can be let-bound around calls to this function."
             (set-marker (make-marker) position buffer))))
          (full-prompt
          (cond
-          ((null prompt) 
+          ((null prompt)
            (let ((gptel--system-message system))
              (gptel--create-prompt start-marker)))
           ((stringp prompt)
@@ -476,6 +624,7 @@ See `gptel--url-get-response' for details."
               (put-text-property 0 (length response) 'gptel 'response response)
               (with-current-buffer (marker-buffer start-marker)
                 (goto-char start-marker)
+                (run-hooks 'gptel-pre-response-hook)
                 (unless (or (bobp) (plist-get info :in-place))
                   (insert "\n\n"))
                 (let ((p (point)))
@@ -488,6 +637,30 @@ See `gptel--url-get-response' for details."
         (message "ChatGPT response error: (%s) %s"
                  status-str (plist-get info :error)))
       (run-hooks 'gptel-post-response-hook))))
+
+(defun gptel-set-topic ()
+  "Set a topic and limit this conversation to the current heading.
+
+This limits the context sent to ChatGPT to the text between the
+current heading and the cursor position."
+  (interactive)
+  (pcase major-mode
+    ('org-mode
+     (org-set-property
+      "GPTEL_TOPIC"
+      (completing-read "Set topic as: "
+                       (org-property-values "GPTEL_TOPIC"))))
+    ('markdown-mode
+     (message
+      "Support for multiple topics per buffer is not implemented for `markdown-mode'."))))
+
+(defun gptel--get-topic-start ()
+  "If a conversation topic is set, return it."
+  (pcase major-mode
+    ('org-mode
+     (when (org-entry-get (point) "GPTEL_TOPIC" 'inherit)
+         (marker-position org-entry-property-inherited-from)))
+    ('markdown-mode nil)))
 
 (defun gptel--create-prompt (&optional prompt-end)
   "Return a full conversation prompt from the contents of this buffer.
@@ -502,13 +675,18 @@ If PROMPT-END (a marker) is provided, end the prompt contents
 there."
   (save-excursion
     (save-restriction
-      (if (use-region-p)
-          (progn (narrow-to-region (region-beginning) (region-end))
-                 (goto-char (point-max)))
-        (goto-char (or prompt-end (point-max))))
+      (cond
+       ((use-region-p)
+        ;; Narrow to region
+        (narrow-to-region (region-beginning) (region-end))
+        (goto-char (point-max)))
+       ((when-let ((topic-start (gptel--get-topic-start)))
+          ;; Narrow to topic
+          (narrow-to-region topic-start (or prompt-end (point-max)))
+          (goto-char (point-max))))
+       (t (goto-char (or prompt-end (point-max)))))
       (let ((max-entries (and gptel--num-messages-to-send
-                              (* 2 (gptel--numberize
-                                    gptel--num-messages-to-send))))
+                              (* 2 gptel--num-messages-to-send)))
             (prop) (prompts))
         (while (and
                 (or (not max-entries) (>= max-entries 0))
@@ -536,9 +714,9 @@ there."
            :messages [,@prompts]
            :stream ,(or (and gptel-stream gptel-use-curl) :json-false))))
     (when gptel-temperature
-      (plist-put prompts-plist :temperature (gptel--numberize gptel-temperature)))
+      (plist-put prompts-plist :temperature gptel-temperature))
     (when gptel-max-tokens
-      (plist-put prompts-plist :max_tokens (gptel--numberize gptel-max-tokens)))
+      (plist-put prompts-plist :max_tokens gptel-max-tokens))
     prompts-plist))
 
 ;; TODO: Use `run-hook-wrapped' with an accumulator instead to handle

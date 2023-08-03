@@ -90,11 +90,10 @@ the response is inserted into the current buffer after point."
                                        (if gptel-stream
                                            #'gptel-curl--stream-insert-response
                                          #'gptel--insert-response))
-                         :transformer (when (or (eq gptel-default-mode 'org-mode)
-                                                (eq (buffer-local-value
-                                                     'major-mode
-                                                     (plist-get info :buffer))
-                                                    'org-mode))
+                         :transformer (when (eq (buffer-local-value
+                                                 'major-mode
+                                                 (plist-get info :buffer))
+                                                'org-mode)
                                         (gptel--stream-convert-markdown->org)))
                    info))
       (if gptel-stream
@@ -237,7 +236,12 @@ See `gptel--url-get-response' for details."
              (current-buffer))
            '((display-buffer-reuse-window
               display-buffer-pop-up-window)
-             (reusable-frames . visible)))))
+             (reusable-frames . visible))))
+        ;; Run pre-response hook
+        (when (and (equal (plist-get proc-info :http-status) "200")
+                   gptel-pre-response-hook)
+          (with-current-buffer (marker-buffer (plist-get proc-info :position))
+            (run-hooks 'gptel-pre-response-hook))))
       
       (when-let ((http-msg (plist-get proc-info :status))
                  (http-status (plist-get proc-info :http-status)))
