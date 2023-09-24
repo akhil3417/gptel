@@ -229,7 +229,9 @@ the string that is sent. To set the directive for a chat session
 interactively call `gptel-send' with a prefix argument."
   :group 'gptel
   :safe #'gptel--always
-  :type '(alist :key-type symbol :value-type string))
+  :type '(alist :key-type (symbol :tag "directive-key")
+                :value-type (list (string :tag "Description")
+                                  (string :tag "Directive/System prompt"))))
 
 (defcustom gptel-max-tokens nil
   "Max tokens per response.
