@@ -229,7 +229,7 @@ interactively call `gptel-send' with a prefix argument."
                 :value-type (list (string :tag "Description")
                                   (string :tag "Directive/System prompt"))))
 
-(defvar-local gptel--system-message (alist-get 'default gptel-directives))
+(defvar-local gptel--system-message (cadr (alist-get 'default gptel-directives)))
 (put 'gptel--system-message 'safe-local-variable #'gptel--always)
 
 (defcustom gptel-max-tokens nil
