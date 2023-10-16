@@ -151,7 +151,7 @@ to ChatGPT. Note: this hook runs even if the request fails."
   :type 'hook)
 
 (defvar gptel-default-session "*ChatGPT*")
-(defcustom gptel-default-mode (if (featurep 'markdown-mode)
+(defcustom gptel-default-mode (if (fboundp 'markdown-mode)
                                'markdown-mode
                              'text-mode)
   "The default major mode for dedicated chat buffers.
@@ -211,10 +211,6 @@ When clicked, CALLBACK will be called."
   (gptel--compat))
 
 ;; Model and interaction parameters
-(defvar-local gptel--system-message
-  "You are a large language model living in Emacs and a helpful assistant. Respond concisely.")
-(put 'gptel--system-message 'safe-local-variable #'gptel--always)
-
 (defcustom gptel-directives
   `((default "Default " ,gptel--system-message) ;; there must be a default prompt for gptel)
     (coding "Programming help" "You are a large language model and a careful programmer. Provide code and only code as output without any additional text, prompt or note.")
@@ -232,6 +228,9 @@ interactively call `gptel-send' with a prefix argument."
   :type '(alist :key-type (symbol :tag "directive-key")
                 :value-type (list (string :tag "Description")
                                   (string :tag "Directive/System prompt"))))
+
+(defvar-local gptel--system-message (alist-get 'default gptel-directives))
+(put 'gptel--system-message 'safe-local-variable #'gptel--always)
 
 (defcustom gptel-max-tokens nil
   "Max tokens per response.
