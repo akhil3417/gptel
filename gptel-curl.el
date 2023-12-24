@@ -37,9 +37,9 @@
 (defconst gptel-curl--common-args
   (if (memq system-type '(windows-nt ms-dos))
       '("--disable" "--location" "--silent" "-XPOST"
-        "-m300" "-D-")
+        "-y300" "-Y1" "-D-")
     '("--disable" "--location" "--silent" "--compressed"
-      "-XPOST" "-m300" "-D-"))
+      "-XPOST" "-y300" "-Y1" "-D-"))
   "Arguments always passed to Curl for gptel queries.")
 
 (defvar gptel-curl--process-alist nil
@@ -49,20 +49,31 @@
   "Produce list of arguments for calling Curl.
 
 PROMPTS is the data to send, TOKEN is a unique identifier."
-  (let* ((url (gptel-backend-url gptel-backend))
+  (let* ((url (let ((backend-url (gptel-backend-url gptel-backend)))
+                    (if (functionp backend-url)
+                        (funcall backend-url) backend-url)))
          (data (encode-coding-string
                 (json-encode (gptel--request-data gptel-backend prompts))
                 'utf-8))
          (headers
           (append '(("Content-Type" . "application/json"))
-                  (when-let ((backend-header (gptel-backend-header gptel-backend)))
-                    (if (functionp backend-header)
-                        (funcall backend-header)
-                      backend-header)))))
+                  (when-let ((header (gptel-backend-header gptel-backend)))
+                    (if (functionp header)
+                        (funcall header) header)))))
     (append
      gptel-curl--common-args
-     (list (format "-w(%s . %%{size_header})" token)
-           (format "-d%s" data))
+     (list (format "-w(%s . %%{size_header})" token))
+     (if (length< data gptel-curl-file-size-threshold)
+         (list (format "-d%s" data))
+       (letrec
+           ((temp-filename (make-temp-file "gptel-curl-data" nil ".json" data))
+            (cleanup-fn (lambda ()
+                          (when (file-exists-p temp-filename)
+                            (delete-file temp-filename)
+                            (remove-hook 'gptel-post-response-hook cleanup-fn)))))
+         (add-hook 'gptel-post-response-hook cleanup-fn)
+         (list "--data-binary"
+               (format "@%s" temp-filename))))
      (when (not (string-empty-p gptel-proxy))
        (list "--proxy" gptel-proxy
              "--proxy-negotiate"
@@ -82,7 +93,7 @@ INFO is a plist with the following keys:
 - :buffer (the gptel buffer)
 - :position (marker at which to insert the response).
 
-Call CALLBACK with the response and INFO afterwards. If omitted
+Call CALLBACK with the response and INFO afterwards.  If omitted
 the response is inserted into the current buffer after point."
   (let* ((token (md5 (format "%s%s%s%s"
                              (random) (emacs-pid) (user-full-name)
@@ -129,7 +140,7 @@ the response is inserted into the current buffer after point."
         (set-process-sentinel process #'gptel-curl--sentinel)))))
 
 (defun gptel-abort (buf)
-  "Stop any active gptel process associated with the current buffer."
+  "Stop any active gptel process associated with buffer BUF."
   (interactive (list (current-buffer)))
   (unless gptel-use-curl
     (user-error "Cannot stop a `url-retrieve' request!"))
@@ -145,7 +156,7 @@ the response is inserted into the current buffer after point."
         (delete-process proc)
         (kill-buffer (process-buffer proc))
         (with-current-buffer buf
-          (when gptel-mode (gptel--update-header-line  " Ready" 'success)))
+          (when gptel-mode (gptel--update-status  " Ready" 'success)))
         (message "Stopped gptel request in buffer %S" (buffer-name buf)))
     (message "No gptel request associated with buffer %S" (buffer-name buf))))
 
@@ -173,9 +184,9 @@ PROCESS and _STATUS are process parameters."
             (with-current-buffer (marker-buffer start-marker)
               (pulse-momentary-highlight-region (+ start-marker 2) tracking-marker)
               (when gptel-mode (save-excursion (goto-char tracking-marker)
-                                               (insert "\n\n" (gptel-prompt-string)))))
+                                               (insert "\n\n" (gptel-prompt-prefix-string)))))
             (with-current-buffer gptel-buffer
-              (when gptel-mode (gptel--update-header-line  " Ready" 'success))))
+              (when gptel-mode (gptel--update-status  " Ready" 'success))))
         ;; Or Capture error message
         (with-current-buffer proc-buf
           (goto-char (point-max))
@@ -200,7 +211,7 @@ PROCESS and _STATUS are process parameters."
              (t (message "ChatGPT error (%s): Could not parse HTTP response." http-msg)))))
         (with-current-buffer gptel-buffer
           (when gptel-mode
-            (gptel--update-header-line
+            (gptel--update-status
              (format " Response Error: %s" http-msg) 'error))))
       (with-current-buffer gptel-buffer
         (run-hooks 'gptel-post-response-hook)))
@@ -219,10 +230,13 @@ See `gptel--url-get-response' for details."
         (with-current-buffer (marker-buffer start-marker)
           (save-excursion
             (unless tracking-marker
-              (gptel--update-header-line " Typing..." 'success)
+              (gptel--update-status " Typing..." 'success)
               (goto-char start-marker)
               (unless (or (bobp) (plist-get info :in-place))
-                (insert "\n\n"))
+                (insert "\n\n")
+                (when gptel-mode
+                  ;; Put prefix before AI response.
+                  (insert (gptel-response-prefix-string))))
               (setq tracking-marker (set-marker (make-marker) (point)))
               (set-marker-insertion-type tracking-marker t)
               (plist-put info :tracking-marker tracking-marker))
@@ -234,7 +248,9 @@ See `gptel--url-get-response' for details."
              0 (length response) '(gptel response rear-nonsticky t)
              response)
             (goto-char tracking-marker)
-            (insert response))))))
+            ;; (run-hooks 'gptel-pre-stream-hook)
+            (insert response)
+            (run-hooks 'gptel-post-stream-hook))))))
 
 (defun gptel-curl--stream-filter (process output)
   (let* ((proc-info (alist-get process gptel-curl--process-alist)))
@@ -280,11 +296,12 @@ See `gptel--url-get-response' for details."
       (when-let ((http-msg (plist-get proc-info :status))
                  (http-status (plist-get proc-info :http-status)))
         ;; Find data chunk(s) and run callback
-        (when (equal http-status "200")
+        (when-let (((equal http-status "200"))
+                   (response (funcall (plist-get proc-info :parser) nil proc-info))
+                   ((not (equal response ""))))
           (funcall (or (plist-get proc-info :callback)
                        #'gptel-curl--stream-insert-response)
-                   (funcall (plist-get proc-info :parser) nil proc-info)
-                   proc-info))))))
+                   response proc-info))))))
 
 (cl-defgeneric gptel-curl--parse-stream (backend proc-info)
   "Stream parser for gptel-curl.
@@ -299,7 +316,7 @@ PROC-INFO is a plist with process information and other context.
 See `gptel-curl--get-response' for its contents.")
 
 (defun gptel-curl--sentinel (process _status)
-  "Process sentinel for GPTel curl requests.
+  "Process sentinel for gptel curl requests.
 
 PROCESS and _STATUS are process parameters."
   (let ((proc-buf (process-buffer process)))
@@ -321,8 +338,7 @@ PROCESS and _STATUS are process parameters."
 (defun gptel-curl--parse-response (proc-info)
   "Parse the buffer BUF with curl's response.
 
-TOKEN is used to disambiguate multiple requests in a single
-buffer."
+PROC-INFO is a plist with contextual information."
   (let ((token (plist-get proc-info :token))
         (parser (plist-get proc-info :parser)))
     (goto-char (point-max))
