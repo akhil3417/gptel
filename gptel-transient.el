@@ -171,17 +171,27 @@ which see."
            (cl-incf idx))
          (push pos taken)
          pos)
+       ;; The explicit declaration ":transient transient--do-return" here
+       ;; appears to be required for Transient v0.5 and up.  Without it, these
+       ;; are treated as suffixes when invoking `gptel-system-prompt' directly,
+       ;; and infixes when going through `gptel-menu'.
+       ;; TODO: Raise an issue with Transient.
        collect (list (key-description key) (capitalize name)
                 `(lambda () (interactive)
                   (message "Directive: %s" ,prompt)
-                  (setq gptel--system-message ,prompt)))
+                  (setq gptel--system-message ,prompt))
+		:transient 'transient--do-return)
        into prompt-suffixes
        finally return
        (nconc
         (list (list 'gptel--suffix-system-message))
         prompt-suffixes
         (list (list "SPC" "Pick crowdsourced prompt"
-                    'gptel--read-crowdsourced-prompt :transient nil))))))
+                    'gptel--read-crowdsourced-prompt
+		    ;; NOTE: Quitting the completing read when picking a
+		    ;; crowdsourced prompt will cause the transient to exit
+		    ;; instead of returning to the system prompt menu.
+                    :transient 'transient--do-exit))))))
 
 (transient-define-prefix gptel-system-prompt ()
   "Change the system prompt to send ChatGPT.
@@ -510,12 +520,12 @@ This uses the prompts in the variable
               nil t)))
         (when-let ((prompt (gethash choice gptel--crowdsourced-prompts)))
             (setq gptel--system-message prompt)
-            (gptel--suffix-system-message)))
+            (call-interactively #'gptel--suffix-system-message)))
     (message "No prompts available.")))
 
 (transient-define-suffix gptel--suffix-system-message ()
   "Set directives sent to ChatGPT."
-  :transient nil
+  :transient 'transient--do-exit
   :description "Set custom directives"
   :key "h"
   (interactive)
@@ -525,19 +535,20 @@ This uses the prompts in the variable
       (let ((inhibit-read-only t))
         (erase-buffer)
         (text-mode)
+        (setq header-line-format
+              (concat
+               "Edit your system message below and press "
+               (propertize "C-c C-c" 'face 'help-key-binding)
+               " when ready, or "
+               (propertize "C-c C-k" 'face 'help-key-binding)
+               " to abort."))
         (insert
-         "# Insert your system message below and press "
-         (propertize "C-c C-c" 'face 'help-key-binding)
-         " when ready, or "
-         (propertize "C-c C-k" 'face 'help-key-binding)
-         " to abort.\n"
          "# Example: You are a helpful assistant. Answer as concisely as possible.\n"
          "# Example: Reply only with shell commands and no prose.\n"
-         "# Example: You are a poet. Reply only in verse.\n")
+         "# Example: You are a poet. Reply only in verse.\n\n")
         (add-text-properties
-         (point-min) (point)
+         (point-min) (1- (point))
          (list 'read-only t 'face 'font-lock-comment-face))
-        (insert "\n")
         ;; TODO: make-separator-line requires Emacs 28.1+.
         ;; (insert (propertize (make-separator-line) 'rear-nonsticky t))
         (set-marker msg-start (point))
@@ -602,9 +613,17 @@ This uses the prompts in the variable
   :key "E"
   :description (lambda () (concat (gptel--refactor-or-rewrite) " and Ediff"))
   (interactive (list (transient-args transient-current-command)))
-  (let* ((prompt (buffer-substring-no-properties
+  (letrec ((prompt (buffer-substring-no-properties
                   (region-beginning) (region-end)))
-         (gptel--system-message gptel--rewrite-message))
+           (gptel--system-message gptel--rewrite-message)
+           ;; TODO: Technically we should save the window config at the time
+           ;; `ediff-setup-hook' runs, but this will do for now.
+           (cwc (current-window-configuration))
+           (gptel--ediff-restore
+            (lambda ()
+              (when (window-configuration-p cwc)
+                (set-window-configuration cwc))
+              (remove-hook 'ediff-quit-hook gptel--ediff-restore))))
     (message "Waiting for response... ")
     (gptel-request
      prompt
@@ -619,12 +638,14 @@ This uses the prompts in the variable
                  (buffer-local-value 'major-mode gptel-buffer)))
            (pcase-let ((`(,new-buf ,new-beg ,new-end)
                         (with-current-buffer (get-buffer-create "*gptel-rewrite-Region.B-*")
-                          (erase-buffer)
-                          (funcall buffer-mode)
-                          (insert response)
-                          (goto-char (point-min))
-                          (list (current-buffer) (point-min) (point-max)))))
+                          (let ((inhibit-read-only t))
+                            (erase-buffer)
+                            (funcall buffer-mode)
+                            (insert response)
+                            (goto-char (point-min))
+                            (list (current-buffer) (point-min) (point-max))))))
              (require 'ediff)
+             (add-hook 'ediff-quit-hook gptel--ediff-restore)
              (apply
               #'ediff-regions-internal
               (get-buffer (ediff-make-cloned-buffer gptel-buffer "-Region.A-"))
