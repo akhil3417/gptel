@@ -123,6 +123,7 @@ which see."
     (gptel--infix-temperature)]
    ["Prompt:"
     ("p" "From minibuffer instead" "p")
+    ("y" "From kill-ring instead" "y")
     ("i" "Replace/Delete prompt" "i")
     "Response to:"
     ("m" "Minibuffer instead" "m")
@@ -176,11 +177,21 @@ which see."
        ;; are treated as suffixes when invoking `gptel-system-prompt' directly,
        ;; and infixes when going through `gptel-menu'.
        ;; TODO: Raise an issue with Transient.
-       collect (list (key-description key) (capitalize name)
-                `(lambda () (interactive)
-                  (message "Directive: %s" ,prompt)
-                  (setq gptel--system-message ,prompt))
-		:transient 'transient--do-return)
+       collect (list (key-description key)
+                     (concat (capitalize name) " "
+                             (propertize " " 'display '(space :align-to 20))
+                             (propertize
+                              (concat
+                               "("
+                               (string-replace
+                                "\n" " "
+                                (truncate-string-to-width prompt (- (window-width) 30) nil nil t))
+                               ")")
+                              'face 'shadow))
+                     `(lambda () (interactive)
+                        (message "Directive: %s" ,prompt)
+                        (setq gptel--system-message ,prompt))
+		     :transient 'transient--do-return)
        into prompt-suffixes
        finally return
        (nconc
@@ -377,13 +388,20 @@ will get progressively longer!"
         (buffer) (position)
         (callback) (gptel-buffer-name)
         (prompt
-         (and (member "p" args)
-              (read-string
-               (format "Ask %s: " (gptel-backend-name gptel-backend))
-               (apply #'buffer-substring-no-properties
-                      (if (use-region-p)
-                          (list (region-beginning) (region-end))
-                        (list (line-beginning-position) (line-end-position))))))))
+         (cond
+          ((member "p" args)
+           (read-string
+            (format "Ask %s: " (gptel-backend-name gptel-backend))
+            (apply #'buffer-substring-no-properties
+                   (if (use-region-p)
+                       (list (region-beginning) (region-end))
+                     (list (line-beginning-position) (line-end-position))))))
+          ((member "y" args)
+           (unless (car-safe kill-ring)
+             (user-error "`kill-ring' is empty!  Nothing to send."))
+           (if current-prefix-arg
+               (read-from-kill-ring "Prompt from kill-ring: ")
+             (current-kill 0))))))
     (cond
      ((member "m" args)
       (setq stream nil)

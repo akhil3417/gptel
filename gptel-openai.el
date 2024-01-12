@@ -113,12 +113,11 @@
 
 ;;;###autoload
 (cl-defun gptel-make-openai
-    (name &key header models stream
-          (key 'gptel-api-key)
+    (name &key header models stream key
           (host "api.openai.com")
           (protocol "https")
           (endpoint "/v1/chat/completions"))
-  "Register a ChatGPT backend for gptel with NAME.
+  "Register an OpenAI API-compatible backend for gptel with NAME.
 
 Keyword arguments:
 
