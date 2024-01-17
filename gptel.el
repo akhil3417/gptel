@@ -3,7 +3,7 @@
 ;; Copyright (C) 2023  Karthik Chikmagalur
 
 ;; Author: Karthik Chikmagalur
-;; Version: 0.5.5
+;; Version: 0.6.0
 ;; Package-Requires: ((emacs "27.1") (transient "0.4.0") (compat "29.1.4.1"))
 ;; Keywords: convenience
 ;; URL: https://github.com/karthink/gptel
@@ -29,20 +29,24 @@
 
 ;; gptel is a simple Large Language Model chat client, with support for multiple models/backends.
 ;;
-;; gptel supports ChatGPT, Azure, Gemini and local models using Ollama and
-;; GPT4All.
+;; gptel supports
+;; - The services ChatGPT, Azure, Gemini, and Kagi (FastGPT & Summarizer)
+;; - Local models via Ollama, Llama.cpp, Llamafiles or GPT4All
 ;;
-;;  Features:
-;;  - It’s async and fast, streams responses.
-;;  - Interact with LLMs from anywhere in Emacs (any buffer, shell, minibuffer,
-;;    wherever)
-;;  - LLM responses are in Markdown or Org markup.
-;;  - Supports conversations and multiple independent sessions.
-;;  - Save chats as regular Markdown/Org/Text files and resume them later.
-;;  - You can go back and edit your previous prompts or LLM responses when
-;;    continuing a conversation.  These will be fed back to the model.
+;;  Additionally, any LLM service (local or remote) that provides an
+;;  OpenAI-compatible API is supported.
 ;;
-;; Requirements for ChatGPT, Azure or Gemini:
+;; Features:
+;; - It’s async and fast, streams responses.
+;; - Interact with LLMs from anywhere in Emacs (any buffer, shell, minibuffer,
+;;   wherever)
+;; - LLM responses are in Markdown or Org markup.
+;; - Supports conversations and multiple independent sessions.
+;; - Save chats as regular Markdown/Org/Text files and resume them later.
+;; - You can go back and edit your previous prompts or LLM responses when
+;;   continuing a conversation.  These will be fed back to the model.
+;;
+;; Requirements for ChatGPT, Azure, Gemini or Kagi:
 ;;
 ;; - You need an appropriate API key.  Set the variable `gptel-api-key' to the
 ;;   key or to a function of no arguments that returns the key.  (It tries to
@@ -50,12 +54,16 @@
 ;;
 ;; - For Azure: define a gptel-backend with `gptel-make-azure', which see.
 ;; - For Gemini: define a gptel-backend with `gptel-make-gemini', which see.
+;; - For Kagi: define a gptel-backend with `gptel-make-kagi', which see
 ;;
-;; For local models using Ollama or GPT4All:
+;; For local models using Ollama, Llama.cpp or GPT4All:
 ;;
 ;; - The model has to be running on an accessible address (or localhost)
 ;; - Define a gptel-backend with `gptel-make-ollama' or `gptel-make-gpt4all',
 ;;   which see.
+;;
+;; Consult the package README for examples and more help with configuring
+;; backends.
 ;;
 ;; Usage:
 ;;
@@ -193,13 +201,17 @@ if the command-line argument size is limited by the operating system."
   '(gptel--convert-org)
   "Abnormal hook for transforming the response from ChatGPT.
 
-This is useful if you want to format the response in some way,
-such as filling paragraphs, adding annotations or recording
-information in the response like links.
+This is used to format the response in some way, such as filling
+paragraphs, adding annotations or recording information in the
+response like links.
 
 Each function in this hook receives two arguments, the response
 string to transform and the ChatGPT interaction buffer.  It
-should return the transformed string."
+should return the transformed string.
+
+NOTE: This is only used for non-streaming responses.  To
+transform streaming responses, use `gptel-post-stream-hook' and
+`gptel-post-response-functions'."
   :group 'gptel
   :type 'hook)
 
@@ -211,12 +223,21 @@ to ChatGPT.  Note: this hook only runs if the request succeeds."
   :group 'gptel
   :type 'hook)
 
-(defcustom gptel-post-response-hook nil
-  "Hook run after inserting the LLM response into the current buffer.
+(define-obsolete-variable-alias
+  'gptel-post-response-hook 'gptel-post-response-functions
+  "0.6.0"
+  "Post-response functions are now called with two arguments: the
+start and end buffer positions of the response.")
+
+(defcustom gptel-post-response-functions nil
+  "Abnormal hook run after inserting the LLM response into the current buffer.
 
 This hook is called in the buffer from which the prompt was sent
-to the LLM, and after the full response has been inserted.  Note:
-this hook runs even if the request fails."
+to the LLM, and after the full response has been inserted.  Each
+function is called with two arguments: the response beginning and
+end positions.
+
+Note: this hook runs even if the request fails."
   :group 'gptel
   :type 'hook)
 
@@ -499,9 +520,9 @@ Note: This will move the cursor."
           (scroll-up-command))
       (error nil))))
 
-(defun gptel-end-of-response (&optional arg)
+(defun gptel-end-of-response (_ _ &optional arg)
   "Move point to the end of the LLM response ARG times."
-  (interactive "p")
+  (interactive (list nil nil current-prefix-arg))
   (dotimes (_ (if arg (abs arg) 1))
     (text-property-search-forward 'gptel 'response t)
     (when (looking-at (concat "\n\\{1,2\\}"
@@ -861,7 +882,8 @@ INFO is a plist containing information relevant to this buffer.
 See `gptel--url-get-response' for details."
   (let* ((status-str  (plist-get info :status))
          (gptel-buffer (plist-get info :buffer))
-         (start-marker (plist-get info :position)))
+         (start-marker (plist-get info :position))
+         response-beg response-end)
     ;; Handle read-only buffers
     (when (with-current-buffer gptel-buffer
             (or buffer-read-only
@@ -869,6 +891,7 @@ See `gptel--url-get-response' for details."
       (message "Buffer is read only, displaying reply in buffer \"*ChatGPT response*\"")
       (display-buffer
        (with-current-buffer (get-buffer-create "*ChatGPT response*")
+         (visual-line-mode 1)
          (goto-char (point-max))
          (move-marker start-marker (point) (current-buffer))
          (current-buffer))
@@ -892,16 +915,17 @@ See `gptel--url-get-response' for details."
                   (insert "\n\n")
                   (when gptel-mode
                     (insert (gptel-response-prefix-string))))
-                (let ((p (point)))
-                  (insert response)
-                  (pulse-momentary-highlight-region p (point)))
-                (when gptel-mode (insert "\n\n" (gptel-prompt-prefix-string))))
+                (setq response-beg (point)) ;Save response start position
+                (insert response)
+                (setq response-end (point))
+                (pulse-momentary-highlight-region response-beg response-end)
+                (when gptel-mode (insert "\n\n" (gptel-prompt-prefix-string)))) ;Save response end position
               (when gptel-mode (gptel--update-status " Ready" 'success))))
         (gptel--update-status
          (format " Response Error: %s" status-str) 'error)
         (message "ChatGPT response error: (%s) %s"
                  status-str (plist-get info :error)))
-      (run-hooks 'gptel-post-response-hook))))
+      (run-hook-with-args 'gptel-post-response-functions response-beg response-end))))
 
 (defun gptel-set-topic ()
   "Set a topic and limit this conversation to the current heading.
@@ -1190,16 +1214,16 @@ elements."
 This function parses a stream of Markdown text to Org
 continuously when it is called with successive chunks of the
 text stream."
-  (letrec ((in-src-block)
+  (letrec ((in-src-block nil)           ;explicit nil to address BUG #183
            (temp-buf (generate-new-buffer-name "*gptel-temp*"))
            (start-pt (make-marker))
            (cleanup-fn
-            (lambda ()
+            (lambda (&rest _)
               (when (buffer-live-p (get-buffer temp-buf))
                 (set-marker start-pt nil)
                 (kill-buffer temp-buf))
-              (remove-hook 'gptel-post-response-hook cleanup-fn))))
-    (add-hook 'gptel-post-response-hook cleanup-fn)
+              (remove-hook 'gptel-post-response-functions cleanup-fn))))
+    (add-hook 'gptel-post-response-functions cleanup-fn)
     (lambda (str)
       (let ((noop-p))
         (with-current-buffer (get-buffer-create temp-buf)
