@@ -133,7 +133,9 @@ which see."
      :reader
      (lambda (prompt _ history)
        (read-string
-        prompt (generate-new-buffer-name "*ChatGPT*") history)))
+        prompt (generate-new-buffer-name
+                (concat "*" (gptel-backend-name gptel-backend) "*"))
+        history)))
     ("e" "Existing session" "e"
      :class transient-option
      :prompt "Existing session: "
@@ -164,6 +166,7 @@ which see."
    'gptel-system-prompt
    (cl-loop for (type . prompt) in gptel-directives
        with taken
+       with width = (window-width)
        for name = (symbol-name type)
        for key =
        (let ((idx 0) pos)
@@ -185,7 +188,7 @@ which see."
                                "("
                                (string-replace
                                 "\n" " "
-                                (truncate-string-to-width prompt (- (window-width) 30) nil nil t))
+                                (truncate-string-to-width prompt (- width 30) nil nil t))
                                ")")
                               'face 'shadow))
                      `(lambda () (interactive)
@@ -318,7 +321,7 @@ will get progressively longer!"
   :model 'gptel-model
   :key "-m"
   :reader (lambda (prompt &rest _)
-            (let* ((backend-name 
+            (let* ((backend-name
                     (if (<= (length gptel--known-backends) 1)
                         (caar gptel--known-backends)
                       (completing-read
