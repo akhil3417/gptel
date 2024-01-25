@@ -23,6 +23,8 @@
 
 ;;; Code:
 (require 'cl-generic)
+(eval-when-compile
+  (require 'cl-lib))
 (require 'map)
 
 (defvar gptel-model)
@@ -113,7 +115,10 @@
 
 ;;;###autoload
 (cl-defun gptel-make-openai
-    (name &key header models stream key
+    (name &key models stream key
+          (header
+           (lambda () (when-let (key (gptel--get-api-key))
+                   `(("Authorization" . ,(concat "Bearer " key))))))
           (host "api.openai.com")
           (protocol "https")
           (endpoint "/v1/chat/completions"))
@@ -139,7 +144,8 @@ alist, like:
 ((\"Content-Type\" . \"application/json\"))
 
 KEY (optional) is a variable whose value is the API key, or
-function that returns the key."  
+function that returns the key."
+  (declare (indent 1))
   (let ((backend (gptel--make-openai
                   :name name
                   :host host
@@ -199,6 +205,7 @@ Example:
  \"/openai/deployments/DEPLOYMENT_NAME/completions?api-version=2023-05-15\"
  :stream t
  :models \\='(\"gpt-3.5-turbo\" \"gpt-4\"))"
+  (declare (indent 1))
   (let ((backend (gptel--make-openai
                   :name name
                   :host host

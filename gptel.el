@@ -120,7 +120,7 @@
 (eval-when-compile
   (require 'subr-x)
   (require 'cl-lib))
-(require 'compat)
+(require 'compat nil t)
 (require 'url)
 (require 'json)
 (require 'map)
@@ -297,8 +297,7 @@ is only inserted in dedicated gptel buffers before the AI's response."
   :type '(alist :key-type symbol :value-type string))
 
 (defcustom gptel-use-header-line t
-  "Whether `gptel-mode' should use header-line for status
-information.
+  "Whether `gptel-mode' should use header-line for status information.
 
 When set to nil, use the mode line for (minimal) status
 information and the echo area for messages."
@@ -432,10 +431,10 @@ with differing settings.")
 (defvar gptel--openai
   (gptel-make-openai
    "ChatGPT"
-   :header (lambda () `(("Authorization" . ,(concat "Bearer " (gptel--get-api-key)))))
    :key 'gptel-api-key
    :stream t
-   :models '("gpt-3.5-turbo" "gpt-3.5-turbo-16k" "gpt-4" "gpt-4-1106-preview")))
+   :models '("gpt-3.5-turbo" "gpt-3.5-turbo-16k"
+             "gpt-4" "gpt-4-1106-preview")))
 
 (defcustom gptel-backend gptel--openai
   "LLM backend to use.
@@ -756,8 +755,10 @@ RESPONSE is nil if there was no response or an error.
 
 The INFO plist has (at least) the following keys:
 :prompt       - The full prompt that was sent with the request
-:position     - marker at the point the request was sent.
-:buffer       - The buffer current when the request was sent.
+:position     - marker at the point the request was sent, unless
+                POSITION is specified.
+:buffer       - The buffer current when the request was sent,
+                unless BUFFER is specified.
 :status       - Short string describing the result of the request
 
 Example of a callback that messages the user with the response
@@ -781,12 +782,15 @@ Or, for just the response:
 If CALLBACK is omitted, the response is inserted at the point the
 request was sent.
 
-BUFFER is the buffer the request belongs to. If omitted the
-current buffer is recorded.
+BUFFER and POSITION are the buffer and position (integer or
+marker) at which the response is inserted.  If a CALLBACK is
+specified, no response is inserted and these arguments are
+ignored, but they are still available in the INFO plist passed
+to CALLBACK for you to use.
 
-POSITION is a buffer position (integer or marker). If omitted,
-the value of (point) or (region-end) is recorded, depending on
-whether the region is active.
+BUFFER defaults to the current buffer, and POSITION to the value
+of (point) or (region-end), depending on whether the region is
+active.
 
 CONTEXT is any additional data needed for the callback to run. It
 is included in the INFO argument to the callback.
@@ -806,6 +810,7 @@ streamed, as in `gptel-stream'. Do not set this if you are
 specifying a custom CALLBACK!
 
 Model parameters can be let-bound around calls to this function."
+  (declare (indent 1))
   (let* ((gptel-stream stream)
          (start-marker
           (cond
@@ -859,6 +864,7 @@ waiting for the response."
   (if (and arg (require 'gptel-transient nil t))
       (call-interactively #'gptel-menu)
   (message "Querying %s..." (gptel-backend-name gptel-backend))
+  (gptel--sanitize-model)
   (let* ((response-pt
           (if (use-region-p)
               (set-marker (make-marker) (region-end))
@@ -984,8 +990,7 @@ there."
         (gptel--parse-buffer gptel-backend max-entries)))))
 
 (cl-defgeneric gptel--parse-buffer (backend max-entries)
-  "Parse the current buffer backwards from point and return a list
-of prompts.
+  "Parse current buffer backwards from point and return a list of prompts.
 
 BACKEND is the LLM backend in use.
 
@@ -1115,6 +1120,22 @@ See `gptel-curl--get-response' for its contents.")
         (list nil (concat "(" http-msg ") Could not parse HTTP response.")
               "Could not parse HTTP response.")))))
 
+(cl-defun gptel--sanitize-model (&key (backend gptel-backend)
+                                      (shoosh t))
+  "Check if `gptel-model' is available in BACKEND, adjust accordingly.
+
+If SHOOSH is true, don't issue a warning."
+  (let* ((available (gptel-backend-models backend)))
+    (unless (member gptel-model available)
+      (let ((fallback (car available)))
+        (unless shoosh
+          (display-warning
+           'gptel
+           (format (concat "Preferred `gptel-model' \"%s\" not"
+                           "supported in \"%s\", using \"%s\" instead")
+                   gptel-model (gptel-backend-name backend) fallback)))
+        (setq-local gptel-model fallback)))))
+
 ;;;###autoload
 (defun gptel (name &optional _ initial interactivep)
   "Switch to or start ChatGPT session with NAME.
@@ -1154,6 +1175,8 @@ INTERACTIVEP is t when gptel is called interactively."
       (text-mode)
       (visual-line-mode 1))
      (t (funcall gptel-default-mode)))
+    (gptel--sanitize-model :backend (default-value 'gptel-backend)
+                           :shoosh nil)
     (unless gptel-mode (gptel-mode 1))
     (goto-char (point-max))
     (skip-chars-backward "\t\r\n")

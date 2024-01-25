@@ -25,7 +25,7 @@
 ;;
 
 ;;; Code:
-(eval-when-compile (require 'cl-lib))
+(require 'cl-lib)
 (require 'gptel)
 (require 'transient)
 
@@ -127,25 +127,25 @@ which see."
     ("i" "Replace/Delete prompt" "i")
     "Response to:"
     ("m" "Minibuffer instead" "m")
-    ("n" "New session" "n"
+    ("g" "gptel session" "g"
      :class transient-option
-     :prompt "Name for new session: "
+     :prompt "Existing or new gptel session: "
      :reader
-     (lambda (prompt _ history)
-       (read-string
+     (lambda (prompt _ _history)
+       (read-buffer
         prompt (generate-new-buffer-name
                 (concat "*" (gptel-backend-name gptel-backend) "*"))
-        history)))
-    ("e" "Existing session" "e"
+        nil (lambda (buf-name)
+              (if (consp buf-name) (setq buf-name (car buf-name)))
+              (let ((buf (get-buffer buf-name)))
+                (and (buffer-local-value 'gptel-mode buf)
+                     (not (eq (current-buffer) buf))))))))
+    ("b" "Any buffer" "b"
      :class transient-option
-     :prompt "Existing session: "
+     :prompt "Output to buffer: "
      :reader
-     (lambda (prompt _ history)
-       (completing-read
-        prompt (mapcar #'buffer-name (buffer-list))
-        (lambda (buf) (and (buffer-local-value 'gptel-mode (get-buffer buf))
-                      (not (equal (current-buffer) buf))))
-        t nil history)))
+     (lambda (prompt _ _history)
+       (read-buffer prompt (buffer-name (other-buffer)) nil)))
     ("k" "Kill-ring" "k")]
    [:description gptel--refactor-or-rewrite
     :if use-region-p
@@ -156,8 +156,10 @@ which see."
      (lambda () (if (derived-mode-p 'prog-mode)
                "Refactor" "Rewrite"))
      gptel-rewrite-menu)]
-   ["Send" (gptel--suffix-send)]])
-
+   ["Send" (gptel--suffix-send)]]
+  (interactive)
+  (gptel--sanitize-model)
+  (transient-setup 'gptel-menu))
 
 ;; ** Prefix for setting the system prompt.
 (defun gptel-system-prompt--setup (_)
@@ -255,10 +257,12 @@ Customize `gptel-directives' for task-specific prompts."
 ;; ** Infixes for model parameters
 
 (defun gptel--transient-read-variable (prompt initial-input history)
-  "Read value from minibuffer and interpret the result as a Lisp object."
-  (condition-case nil
-      (read-from-minibuffer prompt initial-input read-expression-map t history)
-    ('error nil)))
+  "Read value from minibuffer and interpret the result as a Lisp object.
+
+PROMPT, INITIAL-INPUT and HISTORY are as in the Transient reader
+documention."
+  (ignore-errors
+    (read-from-minibuffer prompt initial-input read-expression-map t history)))
 
 (transient-define-infix gptel--infix-num-messages-to-send ()
   "Number of recent messages to send with each exchange.
@@ -390,6 +394,7 @@ will get progressively longer!"
         (backend-name (gptel-backend-name gptel-backend))
         (buffer) (position)
         (callback) (gptel-buffer-name)
+        ;; Input redirection: grab prompt from elsewhere?
         (prompt
          (cond
           ((member "p" args)
@@ -401,10 +406,12 @@ will get progressively longer!"
                      (list (line-beginning-position) (line-end-position))))))
           ((member "y" args)
            (unless (car-safe kill-ring)
-             (user-error "`kill-ring' is empty!  Nothing to send."))
+             (user-error "`kill-ring' is empty!  Nothing to send"))
            (if current-prefix-arg
                (read-from-kill-ring "Prompt from kill-ring: ")
              (current-kill 0))))))
+
+    ;; Output redirection: Send response elsewhere?
     (cond
      ((member "m" args)
       (setq stream nil)
@@ -420,47 +427,17 @@ will get progressively longer!"
               (if (not resp)
                   (message "%s response error: %s" backend-name (plist-get info :status))
                 (kill-new resp)
-                (message "%s response: copied to kill-ring." backend-name)))))
+                (message "%s response: \"%s\" copied to kill-ring."
+                         backend-name
+                         (truncate-string-to-width resp 30))))))
      ((setq gptel-buffer-name
-            (cl-some (lambda (s) (and (string-prefix-p "n" s)
+            (cl-some (lambda (s) (and (string-prefix-p "g" s)
                                  (substring s 1)))
                      args))
-      (setq buffer
-            (gptel gptel-buffer-name
-                   (condition-case nil
-                       (gptel--get-api-key)
-                     ((error user-error)
-                      (setq gptel-api-key
-                            (read-passwd
-                             (format "%s API key: "
-                                     (gptel-backend-name
-                                      gptel-backend))))))
-                   (or prompt
-                       (if (use-region-p)
-                           (buffer-substring-no-properties (region-beginning)
-                                                           (region-end))
-                         (buffer-substring-no-properties
-                          (save-excursion
-                            (text-property-search-backward
-                             'gptel 'response
-                             (when (get-char-property (max (point-min) (1- (point)))
-                                                      'gptel)
-                               t))
-                            (point))
-                          (gptel--at-word-end (point)))))))
-      (with-current-buffer buffer
-        (setq gptel-backend backend)
-        (setq gptel-model model)
-        (gptel--update-status " Waiting..." 'warning)
-        (setq position (point)))
-      (setq output-to-other-buffer-p t))
-     ((setq gptel-buffer-name
-            (cl-some (lambda (s) (and (string-prefix-p "e" s)
-                                 (substring s 1)))
-                     args))
-      (setq buffer (get-buffer gptel-buffer-name))
       (setq output-to-other-buffer-p t)
-      (let ((reduced-prompt
+      (let ((reduced-prompt             ;For inserting into the gptel buffer as
+                                        ;context, not the prompt used for the
+                                        ;request itself
              (or prompt
                  (if (use-region-p)
                      (buffer-substring-no-properties (region-beginning)
@@ -474,18 +451,51 @@ will get progressively longer!"
                          t))
                       (point))
                     (gptel--at-word-end (point)))))))
-        (with-current-buffer buffer
-          (goto-char (point-max))
-          (if (or buffer-read-only
-                  (get-char-property (point) 'read-only))
-              (setq prompt reduced-prompt)
-            (insert reduced-prompt))
-          (setq position (point))
-          (when gptel-mode
-            (gptel--update-status " Waiting..." 'warning))))))
+        (cond
+         ((buffer-live-p (get-buffer gptel-buffer-name))
+          ;; Insert into existing gptel session
+          (progn
+            (setq buffer (get-buffer gptel-buffer-name))
+            (with-current-buffer buffer
+              (goto-char (point-max))
+              (unless (or buffer-read-only
+                          (get-char-property (point) 'read-only))
+                (insert reduced-prompt))
+              (setq position (point))
+              (when gptel-mode
+                (gptel--update-status " Waiting..." 'warning)))))
+         ;; Insert into new gptel session
+         (t (setq buffer
+                  (gptel gptel-buffer-name
+                         (condition-case nil
+                             (gptel--get-api-key)
+                           ((error user-error)
+                            (setq gptel-api-key
+                                  (read-passwd
+                                   (format "%s API key: "
+                                           (gptel-backend-name
+                                            gptel-backend))))))
+                         reduced-prompt))
+            ;; Set backend and model in new session from current buffer
+            (with-current-buffer buffer
+              (setq gptel-backend backend)
+              (setq gptel-model model)
+              (gptel--update-status " Waiting..." 'warning)
+              (setq position (point)))))))
+     ((setq gptel-buffer-name
+            (cl-some (lambda (s) (and (string-prefix-p "b" s)
+                                 (substring s 1)))
+                     args))
+      (setq output-to-other-buffer-p t)
+      (setq buffer (get-buffer-create gptel-buffer-name))
+      (with-current-buffer buffer (setq position (point)))))
+
+    ;; Create prompt, unless doing input-redirection above
+    (unless prompt
+      (setq prompt (gptel--create-prompt (gptel--at-word-end (point)))))
 
     (when in-place
-      (setq prompt (gptel--create-prompt (point)))
+      ;; Kill the latest prompt
       (let ((beg
              (if (use-region-p)
                  (region-beginning)
