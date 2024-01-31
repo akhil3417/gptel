@@ -165,7 +165,7 @@ If you want it to be the default, set it as the default value of =gptel-backend=
 Register a backend with
 #+begin_src emacs-lisp
 (gptel-make-gpt4all "GPT4All"           ;Name of your choosing
- :protocol "http"                       
+ :protocol "http"
  :host "localhost:4891"                 ;Where it's running
  :models '("mistral-7b-openorca.Q4_0.gguf")) ;Available models
 #+end_src
@@ -384,7 +384,7 @@ The default mode is =markdown-mode= if available, else =text-mode=.  You can set
 
 **** Save and restore your chat sessions
 
-Saving the file will save the state of the conversation as well.  To resume the chat, open the file and turn on =gptel-mode= before editing the buffer.  
+Saving the file will save the state of the conversation as well.  To resume the chat, open the file and turn on =gptel-mode= before editing the buffer.
 
 ** FAQ
 #+html: <details><summary>
@@ -455,7 +455,7 @@ For more programmable usage, gptel provides a general =gptel-request= function t
 
 #+html: </details>
 #+html: <details><summary>
-**** (Doom Emacs) Sending a query from the gptel menu fails because of a key conflict with Org mode 
+**** (Doom Emacs) Sending a query from the gptel menu fails because of a key conflict with Org mode
 #+html: </summary>
 
 Doom binds ~RET~ in Org mode to =+org/dwim-at-point=, which appears to conflict with gptel's transient menu bindings for some reason.

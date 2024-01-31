@@ -166,7 +166,7 @@ which see."
   "Set up suffixes for system prompt."
   (transient-parse-suffixes
    'gptel-system-prompt
-   (cl-loop for (type . prompt) in gptel-directives
+   (cl-loop for (type desc prompt) in gptel-directives
        with taken
        with width = (window-width)
        for name = (symbol-name type)
