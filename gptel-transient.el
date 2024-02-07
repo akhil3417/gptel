@@ -32,7 +32,9 @@
 (declare-function ediff-regions-internal "ediff")
 (declare-function ediff-make-cloned-buffer "ediff-utils")
 
+
 ;; * Helper functions
+
 (defun gptel--refactor-or-rewrite ()
   "Rewrite should be refactored into refactor.
 
@@ -50,14 +52,14 @@ Or is it the other way around?"
 
 (defvar gptel--crowdsourced-prompts-url
   "https://github.com/f/awesome-chatgpt-prompts/raw/main/prompts.csv"
-  "URL for crowdsourced ChatGPT system prompts.")
+  "URL for crowdsourced LLM system prompts.")
 
 (defvar gptel--crowdsourced-prompts
   (make-hash-table :test #'equal)
-  "Crowdsourced system prompts for ChatGPT.")
+  "Crowdsourced LLM system prompts.")
 
 (defun gptel--crowdsourced-prompts ()
-  "Acquire and read crowdsourced system prompts for ChatGPT.
+  "Acquire and read crowdsourced LLM system prompts.
 
 These are stored in the variable `gptel--crowdsourced-prompts',
 which see."
@@ -78,11 +80,13 @@ which see."
                 "?"))
           ;; Fetch file
           (message "Fetching prompts...")
-          (if (url-copy-file gptel--crowdsourced-prompts-url
-                             gptel-crowdsourced-prompts-file
-                             'ok-if-already-exists)
-              (message "Fetching prompts... done.")
-            (message "Could not retrieve new prompts."))))
+          (let ((dir (file-name-directory gptel-crowdsourced-prompts-file)))
+            (unless (file-exists-p dir) (mkdir dir 'create-parents))
+            (if (url-copy-file gptel--crowdsourced-prompts-url
+                               gptel-crowdsourced-prompts-file
+                               'ok-if-already-exists)
+		(message "Fetching prompts... done.")
+              (message "Could not retrieve new prompts.")))))
       (if (not (file-readable-p gptel-crowdsourced-prompts-file))
           (progn (message "No crowdsourced prompts available")
                  (call-interactively #'gptel-system-prompt))
@@ -101,6 +105,7 @@ which see."
             (forward-line 1)))))
     gptel--crowdsourced-prompts))
 
+
 ;; * Transient Prefixes
 
 (define-obsolete-function-alias 'gptel-send-menu 'gptel-menu "0.3.2")
@@ -108,7 +113,7 @@ which see."
 ;; BUG: The `:incompatible' spec doesn't work if there's a `:description' below it.
 ;;;###autoload (autoload 'gptel-menu "gptel-transient" nil t)
 (transient-define-prefix gptel-menu ()
-  "Change parameters of prompt to send ChatGPT."
+  "Change parameters of prompt to send to the LLM."
   ;; :incompatible '(("-m" "-n" "-k" "-e"))
   [:description
    (lambda () (format "Directive:  %s"
@@ -121,11 +126,12 @@ which see."
     (gptel--infix-max-tokens)
     (gptel--infix-num-messages-to-send)
     (gptel--infix-temperature)]
-   ["Prompt:"
-    ("p" "From minibuffer instead" "p")
-    ("y" "From kill-ring instead" "y")
-    ("i" "Replace/Delete prompt" "i")
-    "Response to:"
+   ["Prompt from"
+    ("p" "Minibuffer instead" "p")
+    ("y" "Kill-ring instead" "y")
+    ""
+    ("i" "Replace/Delete prompt" "i")]
+    ["Response to"
     ("m" "Minibuffer instead" "m")
     ("g" "gptel session" "g"
      :class transient-option
@@ -146,7 +152,10 @@ which see."
      :reader
      (lambda (prompt _ _history)
        (read-buffer prompt (buffer-name (other-buffer)) nil)))
-    ("k" "Kill-ring" "k")]
+    ("k" "Kill-ring" "k")]]
+  [["Send"
+    (gptel--suffix-send)
+    ("M-RET" "Regenerate" gptel--regenerate :if gptel--in-response-p)]
    [:description gptel--refactor-or-rewrite
     :if use-region-p
     ("r"
@@ -156,7 +165,16 @@ which see."
      (lambda () (if (derived-mode-p 'prog-mode)
                "Refactor" "Rewrite"))
      gptel-rewrite-menu)]
-   ["Send" (gptel--suffix-send)]]
+   ["Tweak Response" :if gptel--in-response-p :pad-keys t
+    ("SPC" "Mark" gptel--mark-response)
+    ("P" "Previous variant" gptel--previous-variant
+     :if gptel--at-response-history-p
+     :transient t)
+    ("N" "Next variant" gptel--previous-variant
+     :if gptel--at-response-history-p
+     :transient t)
+    ("E" "Ediff previous" gptel--ediff
+     :if gptel--at-response-history-p)]]
   (interactive)
   (gptel--sanitize-model)
   (transient-setup 'gptel-menu))
@@ -210,7 +228,7 @@ which see."
                     :transient 'transient--do-exit))))))
 
 (transient-define-prefix gptel-system-prompt ()
-  "Change the system prompt to send ChatGPT.
+  "Change the LLM system prompt.
 
 The \"system\" prompt establishes directives for the chat
 session. Some examples of system prompts are:
@@ -231,7 +249,7 @@ Customize `gptel-directives' for task-specific prompts."
 ;; ** Prefix for rewriting/refactoring
 
 (transient-define-prefix gptel-rewrite-menu ()
-  "Rewrite or refactor text region using ChatGPT."
+  "Rewrite or refactor text region using an LLM."
   [:description
    (lambda ()
      (format "Directive:  %s"
@@ -252,6 +270,7 @@ Customize `gptel-directives' for task-specific prompts."
     (setq gptel--rewrite-message (gptel--rewrite-message)))
   (transient-setup 'gptel-rewrite-menu))
 
+
 ;; * Transient Infixes
 
 ;; ** Infixes for model parameters
@@ -283,11 +302,7 @@ include."
 
 This is roughly the number of words in the response. 100-300 is a
 reasonable range for short answers, 400 or more for longer
-responses.
-
-If left unset, ChatGPT will target about 40% of the total token
-count of the conversation so far in each message, so messages
-will get progressively longer!"
+responses."
   :description "Response length (tokens)"
   :class 'transient-lisp-variable
   :variable 'gptel-max-tokens
@@ -377,6 +392,7 @@ will get progressively longer!"
             (read-string
              prompt (gptel--rewrite-message) history)))
 
+
 ;; * Transient Suffixes
 
 ;; ** Suffix to send prompt
@@ -507,6 +523,10 @@ will get progressively longer!"
                     t))
                  (point))))
             (end (if (use-region-p) (region-end) (point))))
+        (unless output-to-other-buffer-p
+          ;; store the killed text in gptel-history
+          (gptel--attach-response-history
+           (list (buffer-substring-no-properties beg end))))
         (kill-region beg end)))
 
     (gptel-request
@@ -523,6 +543,30 @@ will get progressively longer!"
        buffer '((display-buffer-reuse-window
                  display-buffer-pop-up-window)
                 (reusable-frames . visible))))))
+
+;; ** Suffix to regenerate response
+
+(defun gptel--regenerate ()
+  "Regenerate gptel response at point."
+  (interactive)
+  (when (gptel--in-response-p)
+    (pcase-let* ((`(,beg . ,end) (gptel--get-bounds))
+                 (history (get-char-property (point) 'gptel-history))
+                 (prev-responses (cons (buffer-substring-no-properties beg end)
+                                       history)))
+      (when gptel-mode                  ;Remove prefix/suffix
+        (save-excursion
+          (goto-char beg)
+          (when (looking-back (concat "\n+" (regexp-quote (gptel-response-prefix-string)))
+                              (point-min) 'greedy)
+            (setq beg (match-beginning 0)))
+          (goto-char end)
+          (when (looking-at
+                 (concat "\n+" (regexp-quote (gptel-prompt-prefix-string))))
+            (setq end (match-end 0)))))
+      (delete-region beg end)
+      (gptel--attach-response-history prev-responses)
+      (call-interactively #'gptel--suffix-send))))
 
 ;; ** Set system message
 (defun gptel--read-crowdsourced-prompt ()
@@ -555,7 +599,7 @@ This uses the prompts in the variable
     (message "No prompts available.")))
 
 (transient-define-suffix gptel--suffix-system-message ()
-  "Set directives sent to ChatGPT."
+  "Edit LLM directives."
   :transient 'transient--do-exit
   :description "Set custom directives"
   :key "h"
